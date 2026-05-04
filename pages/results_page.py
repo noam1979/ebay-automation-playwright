@@ -1,46 +1,65 @@
 from pages.base_page import BasePage
+import re
 
 class ResultsPage(BasePage):
     """
-    Handles search results, price filtering, and pagination.
+    Final ultimate fallback version. 
+    Targets item links directly to bypass container naming issues.
     """
-    PRODUCT_CARDS = "//div[@class='s-item__info']"
-    PRICE_XPATH = ".//span[@class='s-item__price']"
-    LINK_XPATH = ".//a[@class='s-item__link']"
-    NEXT_BUTTON = "//a[@aria-label='Go to next search page']"
+    
+    # eBay product links always contain '/itm/'
+    ANY_ITEM_LINK = "a[href*='/itm/']"
 
     def search_items_by_name_under_price(self, max_price: float, limit: int = 5):
         collected_urls = []
-        while len(collected_urls) < limit:
-            self.page.wait_for_selector(self.PRODUCT_CARDS)
-            items = self.page.query_selector_all(self.PRODUCT_CARDS)
+        
+        # Give it a moment to settle
+        self.page.wait_for_timeout(3000)
+        
+        # Get all links that look like products
+        links = self.page.query_selector_all(self.ANY_ITEM_LINK)
+        print(f"DEBUG: Found {len(links)} potential product links.")
 
-            for item in items:
-                if len(collected_urls) >= limit: break
+        for link in links:
+            if len(collected_urls) >= limit:
+                break
+            
+            url = link.get_attribute("href")
+            if not url or "clkid" in url: # Skip ads/tracking links
+                continue
                 
-                price_el = item.query_selector(self.PRICE_XPATH)
-                link_el = item.query_selector(self.LINK_XPATH)
+            clean_url = url.split('?')[0]
+            if clean_url in collected_urls:
+                continue
 
-                if price_el and link_el:
-                    price_val = self._clean_price(price_el.inner_text())
-                    # Filter items by price
-                    if 0 < price_val <= max_price:
-                        url = link_el.get_attribute("href")
-                        if url and "itm" in url:
-                            collected_urls.append(url)
+            # Look for price text near this link (in the parent or sibling)
+            # We search for currency symbols or 'ILS' nearby
+            parent = link.evaluate_handle("el => el.closest('li, div.s-item__wrapper, div.s-item__info')")
+            if parent:
+                price_text = parent.as_element().inner_text()
+                price_val = self._clean_price(price_text)
+                
+                if 0 < price_val <= max_price:
+                    collected_urls.append(clean_url)
+                    print(f"!!! MATCH !!! Found Price: {price_val} | URL: {clean_url}")
 
-            # Pagination logic
-            if len(collected_urls) < limit:
-                next_btn = self.page.query_selector(self.NEXT_BUTTON)
-                if next_btn and next_btn.is_visible():
-                    next_btn.click()
-                    self.page.wait_for_load_state("networkidle")
-                else:
-                    break
-        return collected_urls
+        return list(set(collected_urls)) # Return unique URLs
 
     def _clean_price(self, text: str) -> float:
-        # Handles ranges like '$10 to $20' by taking the first number
-        first_part = text.split('to')[0]
-        clean = "".join(c for c in first_part if c.isdigit() or c == '.')
-        return float(clean) if clean else 0.0
+        """
+        Extracts the numeric value from a block of text.
+        """
+        try:
+            # Cleanup common non-numeric chars
+            clean_text = text.replace(',', '').replace('₪', '').replace('ILS', '').replace('$', '')
+            # Find all numbers with decimals
+            matches = re.findall(r"(\d+\.\d+|\d+)", clean_text)
+            
+            # We look for numbers that look like prices (usually the first or second one)
+            for num in matches:
+                val = float(num)
+                if 1 < val < 10000: # Filter out weird small/huge numbers that aren't prices
+                    return val
+            return 0.0
+        except:
+            return 0.0
